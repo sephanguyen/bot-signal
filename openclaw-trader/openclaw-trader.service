@@ -1,0 +1,51 @@
+[Unit]
+Description=OpenClaw Trader - AI Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated user - không có sudo, không có login shell
+User=openclaw
+Group=openclaw
+WorkingDirectory=/home/pi/openclaw-trader
+
+ExecStart=/home/pi/openclaw-trader/venv/bin/python main.py bot
+
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# ── Security hardening ──
+# Không cho truy cập /home ngoài workdir
+ProtectHome=tmpfs
+BindPaths=/home/pi/openclaw-trader
+
+# Read-only filesystem (trừ /tmp)
+ProtectSystem=strict
+ReadWritePaths=/tmp
+
+# Không cho tạo device files
+PrivateDevices=true
+
+# Không cho thay đổi kernel
+ProtectKernelTunables=true
+ProtectKernelModules=true
+
+# Không cho truy cập /proc/sys
+ProtectControlGroups=true
+
+# Giới hạn syscalls
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Không cho escalate privileges
+NoNewPrivileges=true
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
