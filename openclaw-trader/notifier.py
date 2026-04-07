@@ -303,11 +303,34 @@ class TelegramNotifier:
         if len(text) > 4000:
             text = text[:4000] + "\n..."
         try:
-            asyncio.run(self.bot.send_message(
-                chat_id=Config.TELEGRAM_CHAT_ID, text=text, parse_mode="Markdown",
-            ))
+            # Tránh conflict event loop khi Telegram bot đang chạy
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                # Đang trong async context (Telegram bot) → dùng thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    pool.submit(self._send_sync, text).result(timeout=15)
+            else:
+                # Không có event loop → dùng asyncio.run bình thường
+                asyncio.run(self.bot.send_message(
+                    chat_id=Config.TELEGRAM_CHAT_ID, text=text, parse_mode="Markdown",
+                ))
         except Exception as e:
             logger.error(f"  ❌ Telegram send error: {e}")
+
+    def _send_sync(self, text: str):
+        """Gửi message trong thread riêng với event loop mới."""
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self.bot.send_message(
+                chat_id=Config.TELEGRAM_CHAT_ID, text=text, parse_mode="Markdown",
+            ))
+        finally:
+            loop.close()
 
     def _print_console(self, results: list):
         print("\n⚠️  Telegram chưa cấu hình - in ra console:\n")

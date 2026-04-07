@@ -84,7 +84,7 @@ class PriceStream:
                     on_close=self._on_close,
                     on_open=self._on_open,
                 )
-                self._ws.run_forever(ping_interval=30, ping_timeout=10)
+                self._ws.run_forever(ping_interval=60, ping_timeout=30)
                 delay = self._reconnect_delay  # Reset on clean disconnect
             except Exception as e:
                 print(f"  📡 WS error: {e}")
