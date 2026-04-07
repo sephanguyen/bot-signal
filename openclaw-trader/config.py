@@ -61,6 +61,11 @@ class Config:
         "CLUSDT": "OIL/USDT (Crude)",
     }
 
+        # API rate limiting (free tier: 5 req/min, paid: 50+)
+    AI_MAX_CONCURRENT = int(os.getenv("AI_MAX_CONCURRENT", "2"))  # Max parallel AI calls
+    AI_CALL_DELAY = float(os.getenv("AI_CALL_DELAY", "15"))       # Seconds between calls
+
+
     BINANCE_API = "https://api.binance.com"
     BINANCE_FUTURES_API = "https://fapi.binance.com"
     USE_FUTURES = os.getenv("USE_FUTURES", "false").lower() == "true"

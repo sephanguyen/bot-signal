@@ -1,31 +1,61 @@
 """Gửi thông báo tín hiệu lên Telegram.
 
 Bao gồm: signal alerts, SL/TP hit alerts, trailing stop updates.
-Tối ưu Pi: reuse bot instance, batch gửi.
+Dùng httpx sync thay vì asyncio để tránh event loop conflict.
 """
 
-import asyncio
 import logging
-from telegram import Bot
+import requests as _requests
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-# Singleton bot instance — tránh tạo mới mỗi lần gửi
-_bot_instance: Bot | None = None
 
+def _send_telegram(text: str, parse_mode: str = "Markdown") -> bool:
+    """Gửi message qua Telegram Bot API bằng HTTP trực tiếp.
 
-def _get_bot() -> Bot | None:
-    global _bot_instance
-    if _bot_instance is None and Config.TELEGRAM_BOT_TOKEN:
-        _bot_instance = Bot(token=Config.TELEGRAM_BOT_TOKEN)
-    return _bot_instance
+    Tránh hoàn toàn asyncio — không bao giờ conflict event loop.
+    """
+    if not Config.TELEGRAM_BOT_TOKEN or not Config.TELEGRAM_CHAT_ID:
+        return False
+
+    url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    if len(text) > 4000:
+        text = text[:4000] + "\n..."
+
+    # Thử Markdown trước
+    try:
+        resp = _requests.post(url, json={
+            "chat_id": Config.TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": parse_mode,
+        }, timeout=15)
+        if resp.ok:
+            return True
+    except Exception as e:
+        logger.warning(f"  ⚠️ Telegram Markdown error: {e}")
+
+    # Fallback: plain text (strip markdown chars)
+    try:
+        clean = text.replace('*', '').replace('_', '').replace('`', '')
+        resp = _requests.post(url, json={
+            "chat_id": Config.TELEGRAM_CHAT_ID,
+            "text": clean,
+        }, timeout=15)
+        if resp.ok:
+            return True
+        logger.error(f"  ❌ Telegram error: {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"  ❌ Telegram send error: {e}")
+
+    return False
 
 
 class TelegramNotifier:
 
     def __init__(self):
-        self.bot = _get_bot()
+        self.enabled = bool(Config.TELEGRAM_BOT_TOKEN and Config.TELEGRAM_CHAT_ID)
 
     def notify(self, results: list):
         """Gửi kết quả STRONG tier lên Telegram."""
@@ -35,7 +65,7 @@ class TelegramNotifier:
             print("  ℹ️  Không có tín hiệu STRONG nào được approve")
             return
 
-        if not self.bot:
+        if not self.enabled:
             self._print_console(approved)
             return
 
@@ -54,7 +84,7 @@ class TelegramNotifier:
 
     def notify_medium_signals(self, results: list):
         """Gửi MEDIUM tier — AI đã phân tích, user tự quyết định."""
-        if not results or not self.bot:
+        if not results or not self.enabled:
             return
 
         msg = f"🟡🟡 *MEDIUM Signal* — Tham khảo, tự quyết định\n"
@@ -97,7 +127,7 @@ class TelegramNotifier:
 
     def notify_weak_signals(self, signals: list):
         """Gửi WEAK tier — chỉ summary ngắn, không có AI analysis."""
-        if not signals or not self.bot:
+        if not signals or not self.enabled:
             return
 
         msg = f"🔵 *WEAK Signals* — Chỉ tham khảo\n{'━' * 28}\n\n"
@@ -124,7 +154,7 @@ class TelegramNotifier:
 
     def notify_events(self, events: list):
         """Gửi alert khi SL/TP hit hoặc trailing stop update."""
-        if not events or not self.bot:
+        if not events or not self.enabled:
             return
 
         for event in events:
@@ -287,50 +317,30 @@ class TelegramNotifier:
             msg += f"38.2%=`{fib.get('fib_382')}` 50%=`{fib.get('fib_500')}` 61.8%=`{fib.get('fib_618')}`\n"
 
         msg += f"\n{'─' * 28}\n"
-        msg += f"🤖 *PHÂN TÍCH AI*\n{r.get('reasoning', 'N/A')}\n"
+        reasoning = self._escape_md(r.get('reasoning', 'N/A'))
+        msg += f"🤖 *PHÂN TÍCH AI*\n{reasoning}\n"
 
         if r.get("warnings"):
             msg += f"\n⚠️ *Cảnh báo:*\n"
             for w in r["warnings"]:
-                msg += f"  • {w}\n"
+                msg += f"  • {self._escape_md(w)}\n"
 
         msg += f"\n🛡️ Risk Score: {r.get('risk_score', 'N/A')}/10"
         msg += f"\n{'━' * 28}"
         msg += "\n_⚠️ Tín hiệu tham khảo, không phải lời khuyên đầu tư._"
         return msg
 
+    @staticmethod
+    def _escape_md(text: str) -> str:
+        """Escape ký tự đặc biệt Markdown trong text từ AI."""
+        if not text:
+            return ""
+        for ch in ['*', '_', '`', '[', ']']:
+            text = text.replace(ch, '')
+        return text
+
     def _send(self, text: str):
-        if len(text) > 4000:
-            text = text[:4000] + "\n..."
-        try:
-            # Tránh conflict event loop khi Telegram bot đang chạy
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                # Đang trong async context (Telegram bot) → dùng thread
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    pool.submit(self._send_sync, text).result(timeout=15)
-            else:
-                # Không có event loop → dùng asyncio.run bình thường
-                asyncio.run(self.bot.send_message(
-                    chat_id=Config.TELEGRAM_CHAT_ID, text=text, parse_mode="Markdown",
-                ))
-        except Exception as e:
-            logger.error(f"  ❌ Telegram send error: {e}")
-
-    def _send_sync(self, text: str):
-        """Gửi message trong thread riêng với event loop mới."""
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(self.bot.send_message(
-                chat_id=Config.TELEGRAM_CHAT_ID, text=text, parse_mode="Markdown",
-            ))
-        finally:
-            loop.close()
+        _send_telegram(text)
 
     def _print_console(self, results: list):
         print("\n⚠️  Telegram chưa cấu hình - in ra console:\n")

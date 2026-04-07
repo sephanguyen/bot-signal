@@ -25,6 +25,16 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 2
 RETRY_DELAY = 3  # seconds
 
+# ── Rate limit semaphore ─────────────────────────────────────────────
+_ai_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _ai_semaphore
+    if _ai_semaphore is None:
+        _ai_semaphore = asyncio.Semaphore(Config.AI_MAX_CONCURRENT)
+    return _ai_semaphore
+
 
 # ── Load skill prompts từ markdown files ──────────────────────────────
 
@@ -126,23 +136,27 @@ async def _call_zeroclaw_async(
 async def _call_ai_async(
     system: str, prompt: str, model_class: type[BaseModel],
 ) -> BaseModel | None:
-    """Route tới backend phù hợp, với retry logic."""
+    """Route tới backend phù hợp, với retry logic + rate limiting."""
     call_fn = _call_zeroclaw_async if Config.AI_BACKEND == "zeroclaw" else _call_claude_async
+    sem = _get_semaphore()
 
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            result = await call_fn(system, prompt, model_class)
-            if result is not None:
-                return result
-            if attempt < MAX_RETRIES:
-                logger.warning(f"  ⚠️ AI returned None, retry {attempt + 1}/{MAX_RETRIES}...")
-                await asyncio.sleep(RETRY_DELAY)
-        except Exception as e:
-            if attempt < MAX_RETRIES:
-                logger.warning(f"  ⚠️ AI error: {e}, retry {attempt + 1}/{MAX_RETRIES}...")
-                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-            else:
-                logger.error(f"  ❌ AI failed after {MAX_RETRIES + 1} attempts: {e}")
+    async with sem:
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                result = await call_fn(system, prompt, model_class)
+                if result is not None:
+                    # Delay giữa các calls để tránh rate limit
+                    await asyncio.sleep(Config.AI_CALL_DELAY)
+                    return result
+                if attempt < MAX_RETRIES:
+                    logger.warning(f"  ⚠️ AI returned None, retry {attempt + 1}/{MAX_RETRIES}...")
+                    await asyncio.sleep(RETRY_DELAY)
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    logger.warning(f"  ⚠️ AI error: {e}, retry {attempt + 1}/{MAX_RETRIES}...")
+                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                else:
+                    logger.error(f"  ❌ AI failed after {MAX_RETRIES + 1} attempts: {e}")
     return None
 
 
